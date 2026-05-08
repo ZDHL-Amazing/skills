@@ -1,6 +1,37 @@
 # skills
 
-All the shared agentic skills.
+```
+███████╗██╗  ██╗██╗██╗     ██╗     ███████╗
+██╔════╝██║ ██╔╝██║██║     ██║     ██╔════╝
+███████╗█████╔╝ ██║██║     ██║     ███████╗
+╚════██║██╔═██╗ ██║██║     ██║     ╚════██║
+███████║██║  ██╗██║███████╗███████╗███████║
+╚══════╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝╚══════╝
+
+All the shared agentic skills. 
+```
+
+## Install skill
+
+Running the command below:
+
+```bash
+bunx skills add ZDHL-Amazing/skills --skill [SKILL_NAME]
+```
+
+For example, if I wanna install `flyway-migration`:
+
+```bash
+bunx skills add ZDHL-Amazing/skills --skill flyway-migration
+```
+
+List available skills:
+
+```bash
+bunx skills add ZDHL-Amazing/skills --list
+```
+
+For more advanced usage, refer to [vercel/skills](https://github.com/vercel-labs/skills) docs.
 
 ## Create new skill
 
