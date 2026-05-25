@@ -106,29 +106,120 @@ bash scripts/check_filename.sh \
 
 Capture the output — this is the exact filename to use.
 
-### Step 4 — Make the SQL idempotent
+### Step 4 — Make the SQL idempotent (REQUIRED)
 
-**All SQL must be idempotent.** Every statement must be safe to re-run accidentally:
+**Every statement must produce the same final state regardless of how many times it runs.** This is non-negotiable. Migrations get re-applied after failed deployments, schema repairs, environment refreshes, and partial-failure recoveries. A migration that throws "column already exists" on the second run blocks the entire Flyway history and forces a manual repair.
+
+`IF NOT EXISTS` on `ALTER TABLE` is **not** portable — it only works in MySQL 8.0.29+ / MariaDB. For ALTER and DML, use explicit `INFORMATION_SCHEMA` precondition checks driven by `PREPARE` / `EXECUTE` / `DEALLOCATE`. This works on every MySQL 5.7+ deployment and makes the intent obvious to reviewers.
+
+| Operation | Idempotency pattern |
+|---|---|
+| `CREATE TABLE` | `CREATE TABLE IF NOT EXISTS` |
+| `DROP TABLE` | `DROP TABLE IF EXISTS` |
+| `ALTER TABLE ADD/DROP/MODIFY COLUMN` | `INFORMATION_SCHEMA.COLUMNS` check + dynamic DDL |
+| `CREATE INDEX` / `DROP INDEX` | `INFORMATION_SCHEMA.STATISTICS` check + dynamic DDL |
+| `ADD FOREIGN KEY` | `INFORMATION_SCHEMA.TABLE_CONSTRAINTS` check + dynamic DDL |
+| `UPDATE` / `INSERT` (DML) | `WHERE` clause that makes a re-run a no-op |
+
+#### Pattern: ADD COLUMN
+
+Check `INFORMATION_SCHEMA.COLUMNS` first, then build the DDL conditionally. When the column already exists, execute a harmless `SELECT 1` instead:
 
 ```sql
--- CREATE TABLE
-CREATE TABLE IF NOT EXISTS `foo` ( ... );
-
--- ADD COLUMN
-ALTER TABLE `foo` ADD COLUMN IF NOT EXISTS `bar` VARCHAR(255);
-
--- DROP TABLE
-DROP TABLE IF EXISTS `foo`;
-
--- DROP COLUMN (MySQL / MariaDB)
-ALTER TABLE `foo` DROP COLUMN IF EXISTS `bar`;
-
--- CREATE INDEX
-CREATE INDEX IF NOT EXISTS `idx_foo_bar` ON `foo`(`bar`);
+SET @col_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'orders'
+      AND COLUMN_NAME = 'status_code'
+);
+SET @ddl := IF(
+    @col_exists = 0,
+    'ALTER TABLE `orders` ADD COLUMN `status_code` int NULL DEFAULT NULL COMMENT ''Aggregated status derived from status_events'' AFTER `total_amount`',
+    'SELECT 1'
+);
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 ```
 
-> For older MySQL that lacks `IF NOT EXISTS` on `ALTER`, note in a comment that the statement was
-> verified safe and should only be run once.
+Notes on this pattern:
+- Inside the single-quoted DDL string, escape literal single quotes by doubling them (`''` for `'`) — that's why the column comment above is wrapped in `''…''`.
+- Always scope the check to `TABLE_SCHEMA = DATABASE()` so the migration is environment-agnostic.
+- Repeat the full block for each column. Do **not** try to batch multiple columns into one prepared statement — the failure modes are hard to reason about.
+
+#### Pattern: DROP COLUMN
+
+Invert the condition — execute the `DROP` only when the column is present:
+
+```sql
+SET @col_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'orders'
+      AND COLUMN_NAME = 'legacy_flag'
+);
+SET @ddl := IF(
+    @col_exists = 1,
+    'ALTER TABLE `orders` DROP COLUMN `legacy_flag`',
+    'SELECT 1'
+);
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+```
+
+#### Pattern: CREATE INDEX
+
+Query `INFORMATION_SCHEMA.STATISTICS` by index name:
+
+```sql
+SET @idx_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'orders'
+      AND INDEX_NAME = 'idx_status_code'
+);
+SET @ddl := IF(
+    @idx_exists = 0,
+    'CREATE INDEX `idx_status_code` ON `orders` (`status_code`)',
+    'SELECT 1'
+);
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+```
+
+#### Pattern: UPDATE / INSERT (DML)
+
+DML is idempotent when the `WHERE` clause excludes already-migrated rows. The canonical move is `WHERE <new_column> IS NULL` for a backfill — once a row is populated, it will not be touched again:
+
+```sql
+UPDATE `orders` o
+SET `status_code` = (
+    SELECT CASE
+        WHEN e.`raw_status` IN ('NEW', 'QUEUED')      THEN 1
+        WHEN e.`raw_status` IN ('PICKING', 'PACKING') THEN 2
+        WHEN e.`raw_status` = 'SHIPPED'               THEN 3
+        WHEN e.`raw_status` = 'DELIVERED'             THEN 4
+        WHEN e.`raw_status` = 'CANCELLED'             THEN 9
+        ELSE NULL
+    END
+    FROM `status_events` e
+    WHERE e.`is_deleted` = 0
+      AND e.`source_type` = 'ORDER'
+      AND e.`source_id`   = o.`id`
+    ORDER BY e.`updated_at` DESC, e.`event_id` DESC
+    LIMIT 1
+)
+WHERE o.`status_code` IS NULL;
+```
+
+For `INSERT`, use `INSERT IGNORE` with a unique key, `INSERT ... ON DUPLICATE KEY UPDATE`, or `INSERT ... SELECT ... WHERE NOT EXISTS (...)`. Naked `INSERT` statements are never acceptable in a migration.
+
+> If a statement genuinely cannot be made idempotent (rare — usually a data-fix one-shot), leave a comment explaining why and exactly what guard the operator must apply before re-running. Treat this as the last resort, not the default.
 
 ### Step 5 — Write the migration file
 
@@ -159,14 +250,20 @@ Display the full file path and complete file content for review before confirmin
 - [ ] Date obtained from system (never hardcoded)
 - [ ] Sequence scanned from existing files for today; baseline files ignored
 - [ ] Description is concise, snake_case, matches the actual SQL operation
-- [ ] All SQL statements have `IF NOT EXISTS` / `IF EXISTS` guards
+- [ ] `CREATE/DROP TABLE` uses `IF NOT EXISTS` / `IF EXISTS`
+- [ ] Every `ALTER TABLE` (add/drop/modify column, add index, add FK) is wrapped in an `INFORMATION_SCHEMA` precondition check + `PREPARE`/`EXECUTE`/`DEALLOCATE`
+- [ ] Every `UPDATE` / `INSERT` has a `WHERE` guard (or `INSERT IGNORE` / `ON DUPLICATE KEY UPDATE`) that makes re-running a no-op
+- [ ] Single quotes inside dynamic DDL strings are escaped as `''`
+- [ ] Schema scope on every check is `TABLE_SCHEMA = DATABASE()` (not a hardcoded schema name)
 - [ ] Double underscore `__` used (not single)
 - [ ] Header comment present in the file
 - [ ] File written to the correct path and shown to user
 
 ---
 
-## Example
+## Examples
+
+### Example 1 — CREATE TABLE
 
 **Input SQL:**
 ```sql
@@ -195,6 +292,55 @@ CREATE TABLE IF NOT EXISTS `order_relation` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Order-user relation';
 ```
+
+### Example 2 — ADD COLUMN + backfill (idempotent ALTER + guarded UPDATE)
+
+**Input intent:** add a `status_code` column to `orders`, then backfill it from `status_events`.
+
+**Generated file:** `V20260508_002__add_status_code_to_orders.sql`
+
+```sql
+-- Migration:   V20260508_002__add_status_code_to_orders.sql
+-- Created:     2026-05-08
+-- Description: Add status_code to orders and backfill from status_events
+
+SET @col_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'orders'
+      AND COLUMN_NAME = 'status_code'
+);
+SET @ddl := IF(
+    @col_exists = 0,
+    'ALTER TABLE `orders` ADD COLUMN `status_code` int NULL DEFAULT NULL COMMENT ''Aggregated status derived from status_events'' AFTER `total_amount`',
+    'SELECT 1'
+);
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+UPDATE `orders` o
+SET `status_code` = (
+    SELECT CASE
+        WHEN e.`raw_status` IN ('NEW', 'QUEUED')      THEN 1
+        WHEN e.`raw_status` IN ('PICKING', 'PACKING') THEN 2
+        WHEN e.`raw_status` = 'SHIPPED'               THEN 3
+        WHEN e.`raw_status` = 'DELIVERED'             THEN 4
+        WHEN e.`raw_status` = 'CANCELLED'             THEN 9
+        ELSE NULL
+    END
+    FROM `status_events` e
+    WHERE e.`is_deleted` = 0
+      AND e.`source_type` = 'ORDER'
+      AND e.`source_id`   = o.`id`
+    ORDER BY e.`updated_at` DESC, e.`event_id` DESC
+    LIMIT 1
+)
+WHERE o.`status_code` IS NULL;
+```
+
+Re-running this file is a no-op: the `ALTER` is skipped because the column now exists, and the `UPDATE` matches zero rows because every target row has already been backfilled.
 
 ---
 
