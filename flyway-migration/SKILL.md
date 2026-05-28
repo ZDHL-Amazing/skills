@@ -13,17 +13,54 @@ description: >
 Generate properly named, idempotent, MySQL 8.0-compatible Flyway migration files under the team's
 standard path. Strong constraints below come from real production incidents — follow them exactly.
 
-## Scripts
+## Version Allocation (flyway-sequence MCP)
 
-Two helper scripts handle date detection and sequence resolution. Load only the one for the current
-platform — **do not read both**.
+Migration versions are allocated **centrally and atomically** by the `flyway-sequence` MCP server —
+never by scanning the directory or computing a sequence number by hand. Two classes of bug motivated
+this: two people (or two agents) picking the same `_00N` on the same day, and an agent miscounting
+after a partially-merged branch left a gap. A shared counter removes both.
 
-| Platform | Script |
-|---|---|
-| Linux / macOS | `scripts/check_filename.sh` |
-| Windows | `scripts/check_filename.ps1` |
+| Tool | What it does | When to call it |
+|---|---|---|
+| `next_sequence` | Allocates the next version prefix for today | Exactly **once per file you are about to create** |
+| `rollback_sequence` | Decrements today's counter by 1 | **Only** when the user explicitly asks to delete / 撤回 / roll back / remove a version |
 
-Read the relevant script before executing it so you understand its arguments and output format.
+### `next_sequence`
+
+Returns the complete version prefix — date, sequence number, and the trailing double underscore —
+already assembled:
+
+```json
+{ "success": true, "sequence": "V20260528_002__", "message": null }
+```
+
+Build the filename by appending the description and `.sql` directly to `sequence`. The prefix
+**already ends in `__`**, so do not add another underscore:
+
+```
+sequence + description + ".sql"
+"V20260528_002__" + "add_new_user_table" + ".sql"
+→ V20260528_002__add_new_user_table.sql
+```
+
+Derive the header `Created:` date from the prefix as well (`V20260528_…` → `2026-05-28`) so the date
+and the version can never disagree.
+
+If the response has `"success": false` or comes back as an error, **stop and report it** — do not
+invent or hand-calculate a sequence as a workaround. A fabricated number collides with the shared
+counter and produces duplicate versions.
+
+### `rollback_sequence`
+
+This decrements the shared counter by one, so each call must correspond to exactly one unwanted
+allocation. Call it **only** on an explicit user instruction to remove or revert a version — e.g.
+"delete that migration", "撤回上一个版本", "roll back the sequence".
+
+Never call it on your own initiative: not after a failed file write, not after a validation error,
+not when abandoning a draft, not "just to be safe". An automatic rollback after a transient hiccup
+double-frees the number, and the next `next_sequence` then hands out a duplicate. If you allocated a
+sequence and writing the file failed, retry the write with the **same** sequence rather than rolling
+back.
 
 ---
 
@@ -45,6 +82,9 @@ processing, entrust). Flyway only scans this one location — files placed under
 V{YYYYMMDD}_{SEQ}__{description}.sql
 ```
 
+`next_sequence` produces the `V{YYYYMMDD}_{SEQ}__` portion for you; you only supply
+`{description}.sql`. The table below explains each part so you can sanity-check the final name.
+
 | Part | Rule |
 |---|---|
 | `V` | **Uppercase** — lowercase `v` is silently ignored (no error, no execution) |
@@ -60,16 +100,7 @@ V{YYYYMMDD}_{SEQ}__{description}.sql
 
 ## Step-by-Step Workflow
 
-### Step 1 — Detect the platform and read the matching script
-
-```bash
-uname -s 2>/dev/null || echo "Windows"
-```
-
-- Output contains `Linux` or `Darwin` → read and run **`scripts/check_filename.sh`**
-- Command fails or output is `Windows` → read and run **`scripts/check_filename.ps1`**
-
-### Step 2 — Derive the description from the SQL
+### Step 1 — Derive the description from the SQL
 
 | SQL action | Description pattern |
 |---|---|
@@ -85,26 +116,7 @@ uname -s 2>/dev/null || echo "Windows"
 Keep descriptions short (2–5 words), lowercase, underscore-separated. If the user supplies their
 own description, use it verbatim (spaces → underscores, lowercase).
 
-### Step 3 — Run the script to get the filename
-
-**Linux / macOS:**
-```bash
-bash scripts/check_filename.sh \
-  "yudao-module-system/yudao-module-system-server/src/main/resources/db/migration" \
-  "add_order_relation_table"
-# → V20260508_001__add_order_relation_table.sql
-```
-
-**Windows:**
-```powershell
-.\scripts\check_filename.ps1 `
-  -MigrationDir "yudao-module-system\yudao-module-system-server\src\main\resources\db\migration" `
-  -Description "add_order_relation_table"
-```
-
-Capture the output — this is the exact filename to use.
-
-### Step 4 — Make the SQL idempotent (REQUIRED)
+### Step 2 — Make the SQL idempotent (REQUIRED)
 
 **Every statement must produce the same final state regardless of how many times it runs.** This is
 non-negotiable. Re-runs happen after failed deployments, partial-failure recoveries, `flyway repair`,
@@ -241,7 +253,7 @@ WHERE NOT EXISTS (
 
 Naked `INSERT` statements are never acceptable in a migration.
 
-### Step 5 — DDL and DML must not share a file
+### Step 3 — DDL and DML must not share a file
 
 **One file is either DDL (`CREATE` / `ALTER` / `DROP`) or DML (`INSERT` / `UPDATE` / `DELETE`) —
 never both.** MySQL implicitly commits when a DDL statement runs, so a transaction cannot protect
@@ -260,7 +272,24 @@ V20260521_006__backfill_dispatch_status.sql      ← pure DML
 The DDL file runs first to add the column; the DML file runs after to backfill. Each file is
 independently idempotent.
 
-### Step 6 — Write the migration file
+### Step 4 — Allocate a version for each file via `next_sequence`
+
+By now you know how many files you are creating — one for a pure DDL or pure DML change, two if you
+split. Call `next_sequence` **once for each of those files**, right before you write it:
+
+1. Call `next_sequence`.
+2. Read `sequence` from the response (e.g. `V20260528_002__`).
+3. Filename = `sequence` + description + `.sql` → `V20260528_002__add_status_code_to_orders.sql`.
+
+For a DDL + DML split, call `next_sequence` twice. The two consecutive numbers it returns keep the
+DDL file ordered ahead of the DML file (e.g. `_002` for the DDL, `_003` for the DML), which is exactly
+the run order you want.
+
+Don't pre-allocate sequences you might not use, and never reuse or hand-edit a returned number — the
+counter is shared with everyone working today, so a guessed number will eventually collide with a
+real one.
+
+### Step 5 — Write the migration file
 
 Path:
 
@@ -278,7 +307,7 @@ Always include this header:
 
 Then the idempotent SQL body.
 
-### Step 7 — Show the result to the user
+### Step 6 — Show the result to the user
 
 Display the full file path and complete file content for review before confirming the task is done.
 If you split DDL/DML into two files, show both.
@@ -310,8 +339,10 @@ will retry the migration cleanly.
 
 ## Checklist
 
-- [ ] Platform detected; correct script read and used
-- [ ] Date from system (never hardcoded), sequence scanned from existing files
+- [ ] Version allocated via `next_sequence` — one call per file, never hand-computed or reused
+- [ ] Filename = returned `sequence` + description + `.sql` (no extra underscore — prefix already ends in `__`)
+- [ ] `Created:` date taken from the returned prefix, not hardcoded
+- [ ] `rollback_sequence` called only on an explicit user request to remove a version (never auto)
 - [ ] Description is concise, snake_case, matches the SQL operation
 - [ ] No `ALTER TABLE ... IF NOT EXISTS` / `IF EXISTS` (MariaDB-only syntax)
 - [ ] No multi-column batched `ALTER` — one `INFORMATION_SCHEMA` block per column
@@ -419,11 +450,12 @@ zero rows when every target has been backfilled.
 
 | Scenario | Handling |
 |---|---|
-| Migration dir does not exist | Script creates it automatically (`mkdir -p` / `New-Item`) |
-| Multiple related DDL statements | Combine into one DDL file |
-| Mixed DDL + DML intent | Split — one DDL file, one DML file (see Step 5) |
-| Multiple unrelated changes | One file per logical change; run the script once per file |
-| Baseline file (`V{DATE}__baseline.sql`) | Script ignores it — pattern requires `_NNN__` segment |
-| Sequence rolls `009` → `010` | Scripts strip leading zeros before arithmetic — no octal issue |
+| Migration dir does not exist | Writing the file creates parent directories; the standard path already exists in this repo |
+| Multiple related DDL statements | Combine into one DDL file (one `next_sequence` call) |
+| Mixed DDL + DML intent | Split — one DDL file, one DML file (see Step 3); call `next_sequence` once per file |
+| Multiple unrelated changes | One file per logical change; call `next_sequence` once per file |
+| `next_sequence` returns `success: false` / error | Stop and report it — never fall back to a hand-computed number |
+| User accidentally allocated a sequence and asks to undo it | Call `rollback_sequence` once per version to remove (only on explicit request) |
+| Failed file write after allocating | Retry the write with the **same** sequence; do not `rollback_sequence` |
 | Failed migration blocks startup | See "Recovering from a failed migration" above |
 | User supplies a custom description | Use verbatim, normalised to snake_case lowercase |
