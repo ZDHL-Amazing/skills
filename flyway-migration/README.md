@@ -17,6 +17,12 @@ column, or turn pasted SQL into a migration script.
 - Allocates the migration version through the **`flyway-sequence` MCP** (see below) instead of
   scanning the directory, so concurrent authors never collide on the same daily sequence number.
 
+## Install Skill
+
+```bash
+npx skills add git@github.com:ZDHL-Amazing/skills.git --skill flyway-migration
+```
+
 ## Companion MCP: `flyway-sequence` (required)
 
 Version numbers are handed out by a centralized, atomic counter exposed over MCP. The skill calls:

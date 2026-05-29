@@ -16,19 +16,19 @@ All the shared agentic skills.
 Running the command below:
 
 ```bash
-bunx skills add ZDHL-Amazing/skills --skill [SKILL_NAME]
+npx skills add git@github.com:ZDHL-Amazing/skills.git --skill [SKILL_NAME]
 ```
 
 For example, if I wanna install `flyway-migration`:
 
 ```bash
-bunx skills add ZDHL-Amazing/skills --skill flyway-migration
+npx skills add git@github.com:ZDHL-Amazing/skills.git --skill flyway-migration
 ```
 
 List available skills:
 
 ```bash
-bunx skills add ZDHL-Amazing/skills --list
+npx skills add git@github.com:ZDHL-Amazing/skills.git --list
 ```
 
 For more advanced usage, refer to [vercel/skills](https://github.com/vercel-labs/skills) docs.
@@ -44,7 +44,7 @@ git clone https://github.com/ZDHL-Amazing/skills.git
 2. running the command below in the repo
 
 ```bash
-bunx skills init [YOUR_SKILL_NAME]
+npx skills init [YOUR_SKILL_NAME]
 ```
 
 
