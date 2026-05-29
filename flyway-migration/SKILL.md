@@ -64,15 +64,71 @@ back.
 
 ---
 
-## Migration Directory
+## Locating the Migration Directory
+
+Flyway scans exactly one directory. Across this team's repos it always ends in the suffix:
 
 ```
-yudao-module-system/yudao-module-system-server/src/main/resources/db/migration
+yudao-module-system-server/src/main/resources/db/migration
 ```
 
 **All migration files live here, including changes for other business modules** (erp, logistics,
 processing, entrust). Flyway only scans this one location — files placed under another module's
-`resources/db/migration/` will silently never run.
+`resources/db/migration/` silently never run.
+
+**Discover this directory by searching — never assume it sits at a fixed relative path.** In a plain
+backend checkout it is `yudao-module-system/yudao-module-system-server/src/main/resources/db/migration`
+under the repo root, but in a monorepo the backend is nested under some subfolder (alongside the
+front-end), so a hardcoded path resolves to the wrong place — or, worse, silently creates an orphaned
+`db/migration` tree that Flyway never scans and whose migrations never run. That failure is invisible
+until a deploy is missing its schema change, which is exactly why we search instead of assuming.
+
+The other business modules each keep their own `resources/db/migration/` folder that Flyway ignores.
+The `yudao-module-system-server` portion of the suffix is what tells the real directory apart from
+those decoys — match on the full suffix, not on a bare `db/migration`.
+
+### How to find it (cross-platform)
+
+Run the search from the repository root (or wherever the user is working). These approaches behave
+identically on Windows, Linux, and macOS.
+
+1. **Glob tool (primary).** Claude Code's built-in Glob tool needs no external binary and works the
+   same on every OS. Match the migration files and take their parent directory:
+
+   ```
+   **/yudao-module-system-server/src/main/resources/db/migration/V*.sql
+   ```
+
+   The `V*.sql` filter confirms you've found the *active* Flyway directory — the one already holding
+   real migrations — rather than an empty look-alike. The directory you want is the parent of any
+   match.
+
+2. **`rg` fallback (for agents without the Glob tool).** ripgrep ships for all three OSes; `rg --files`
+   lists files while honoring `.gitignore`:
+
+   ```bash
+   rg --files -g '**/yudao-module-system-server/src/main/resources/db/migration/V*.sql'
+   ```
+
+   Take the parent directory of any result.
+
+3. **Last-resort OS commands** (only if neither of the above is available):
+   - Linux / macOS: `find . -type d -path '*/yudao-module-system-server/src/main/resources/db/migration'`
+   - Windows PowerShell: `Get-ChildItem -Recurse -Directory | Where-Object { $_.FullName -like '*yudao-module-system-server\src\main\resources\db\migration' }`
+
+**Use the path exactly as the tool returns it**, including its separators (`/` vs `\`). Don't rebuild
+it by concatenating string fragments — that's how separator bugs and orphaned directories creep in on
+Windows.
+
+### Resolving the result
+
+| Matches | What to do |
+|---|---|
+| Exactly one | Use that directory. This is the normal case. |
+| More than one | Unusual — typically a nested git worktree or a vendored copy. Auto-pick the **shallowest** path (fewest separators — almost always the primary checkout), proceed, and tell the user which one you chose and what the alternatives were, so they can redirect you if the guess is wrong. |
+| Zero | The backend module isn't in the current tree, or it lives somewhere unexpected. **Don't fabricate a path and write into it** — that recreates the original unsafe behavior. Warn the user, show where you searched, and ask them to point you at the `db/migration` directory before you write anything. |
+
+Discover the path once and reuse it for Step 5 — there's no need to search again per file.
 
 ---
 
@@ -291,11 +347,15 @@ real one.
 
 ### Step 5 — Write the migration file
 
-Path:
+Write into the directory you discovered in "Locating the Migration Directory" — not a hardcoded
+relative path:
 
 ```
-yudao-module-system/yudao-module-system-server/src/main/resources/db/migration/{FILENAME}
+{MIGRATION_DIR}/{FILENAME}
 ```
+
+where `{MIGRATION_DIR}` is the located path ending in
+`yudao-module-system-server/src/main/resources/db/migration`.
 
 Always include this header:
 
@@ -354,7 +414,8 @@ will retry the migration cleanly.
 - [ ] Every `INSERT` has `WHERE NOT EXISTS (<target row check>)` — not a parent-row check
 - [ ] **No DDL and DML in the same file** — split into two
 - [ ] Schema scope is `TABLE_SCHEMA = DATABASE()` (never a hardcoded schema name)
-- [ ] Uppercase `V`, double underscore `__`, file in the system module's `db/migration` directory
+- [ ] Migration directory **located by searching** for the `yudao-module-system-server/…/db/migration` suffix (not a hardcoded path); user warned if multiple/zero matches
+- [ ] Uppercase `V`, double underscore `__`, file written into that discovered directory
 - [ ] Header comment present
 - [ ] File written and shown to user
 
@@ -450,7 +511,9 @@ zero rows when every target has been backfilled.
 
 | Scenario | Handling |
 |---|---|
-| Migration dir does not exist | Writing the file creates parent directories; the standard path already exists in this repo |
+| Search finds no migration directory | Don't fabricate a path — warn the user, show where you searched, and ask them to point you at the directory (see "Locating the Migration Directory") |
+| Search finds multiple migration directories | Auto-pick the shallowest path and tell the user which you chose and what the alternatives were (see "Locating the Migration Directory") |
+| Monorepo (front-end + back-end in one tree) | The backend is nested under a subfolder, so the migration dir is *not* at the repo root — the search handles this; never assume the fixed relative path |
 | Multiple related DDL statements | Combine into one DDL file (one `next_sequence` call) |
 | Mixed DDL + DML intent | Split — one DDL file, one DML file (see Step 3); call `next_sequence` once per file |
 | Multiple unrelated changes | One file per logical change; call `next_sequence` once per file |

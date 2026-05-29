@@ -7,7 +7,9 @@ column, or turn pasted SQL into a migration script.
 ## What it does
 
 - Names files to the team standard: `V{YYYYMMDD}_{SEQ}__{description}.sql` (uppercase `V`, double
-  underscore, lowercase `.sql`), placed in the single directory Flyway actually scans.
+  underscore, lowercase `.sql`), and **locates the single directory Flyway actually scans by
+  searching** for the `yudao-module-system-server/…/db/migration` suffix — so it works in a monorepo
+  where the backend is nested under a subfolder, not just a plain backend checkout.
 - Enforces **idempotency** — `IF NOT EXISTS` / `INFORMATION_SCHEMA` guards, one check per column, and
   `WHERE NOT EXISTS` row checks — so a re-run after a failed deploy never throws "already exists".
 - Keeps **DDL and DML in separate files**, because MySQL implicitly commits on DDL and a single
