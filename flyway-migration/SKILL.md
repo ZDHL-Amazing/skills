@@ -23,7 +23,7 @@ after a partially-merged branch left a gap. A shared counter removes both.
 | Tool | What it does | When to call it |
 |---|---|---|
 | `next_sequence` | Allocates the next version prefix for today | Exactly **once per file you are about to create** |
-| `rollback_sequence` | Decrements today's counter by 1 | **Only** when the user explicitly asks to delete / 撤回 / roll back / remove a version |
+| `rollback_sequence` | Decrements today's counter by 1 | **Only** when the user explicitly asks to delete / retract / roll back / remove a version |
 
 ### `next_sequence`
 
@@ -54,7 +54,7 @@ counter and produces duplicate versions.
 
 This decrements the shared counter by one, so each call must correspond to exactly one unwanted
 allocation. Call it **only** on an explicit user instruction to remove or revert a version — e.g.
-"delete that migration", "撤回上一个版本", "roll back the sequence".
+"delete that migration", "retract the previous version", "roll back the sequence".
 
 Never call it on your own initiative: not after a failed file write, not after a validation error,
 not when abandoning a draft, not "just to be safe". An automatic rollback after a transient hiccup
@@ -261,16 +261,16 @@ seven BaseDO columns:
 
 ```sql
 CREATE TABLE IF NOT EXISTS `<table>` (
-    `id`          BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
-    -- 业务列 ...
-    `creator`     VARCHAR(64) DEFAULT ''  COMMENT '创建者',
-    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    `updater`     VARCHAR(64) DEFAULT ''  COMMENT '更新者',
-    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    `deleted`     BIT(1)      NOT NULL DEFAULT b'0' COMMENT '是否删除',
-    `tenant_id`   BIGINT      NOT NULL DEFAULT 0 COMMENT '租户编号',
+    `id`          BIGINT      NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+    -- Business columns ...
+    `creator`     VARCHAR(64) DEFAULT ''  COMMENT 'Created by',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation time',
+    `updater`     VARCHAR(64) DEFAULT ''  COMMENT 'Updated by',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update time',
+    `deleted`     BIT(1)      NOT NULL DEFAULT b'0' COMMENT 'Deletion flag',
+    `tenant_id`   BIGINT      NOT NULL DEFAULT 0 COMMENT 'Tenant ID',
     PRIMARY KEY (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='<表注释>';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='<table comment>';
 ```
 
 #### Pattern: UPDATE backfill
@@ -435,17 +435,17 @@ will retry the migration cleanly.
 -- Description: Add order_relation table to store order-user associations
 
 CREATE TABLE IF NOT EXISTS `order_relation` (
-    `id`          BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
-    `order_id`    BIGINT      NOT NULL COMMENT '订单ID',
-    `user_id`     BIGINT      NOT NULL COMMENT '用户ID',
-    `creator`     VARCHAR(64) DEFAULT ''  COMMENT '创建者',
-    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    `updater`     VARCHAR(64) DEFAULT ''  COMMENT '更新者',
-    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    `deleted`     BIT(1)      NOT NULL DEFAULT b'0' COMMENT '是否删除',
-    `tenant_id`   BIGINT      NOT NULL DEFAULT 0 COMMENT '租户编号',
+    `id`          BIGINT      NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+    `order_id`    BIGINT      NOT NULL COMMENT 'Order ID',
+    `user_id`     BIGINT      NOT NULL COMMENT 'User ID',
+    `creator`     VARCHAR(64) DEFAULT ''  COMMENT 'Created by',
+    `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation time',
+    `updater`     VARCHAR(64) DEFAULT ''  COMMENT 'Updated by',
+    `update_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update time',
+    `deleted`     BIT(1)      NOT NULL DEFAULT b'0' COMMENT 'Deletion flag',
+    `tenant_id`   BIGINT      NOT NULL DEFAULT 0 COMMENT 'Tenant ID',
     PRIMARY KEY (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单与用户关系表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Order-user associations';
 ```
 
 ### Example 2 — ADD COLUMN + backfill (split into two files)
