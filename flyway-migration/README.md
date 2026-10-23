@@ -34,61 +34,36 @@ Version numbers are handed out by a centralized, atomic counter exposed over MCP
 
 Without this MCP the skill cannot allocate a version, so install it before using the skill.
 
-### Claude Code
-
-```bash
-claude mcp add --transport http \
-  flyway-sequence \
-  https://flyway.ynbr.one/api/mcp
-```
-
-### Codex
-
-Add to your Codex config (`~/.codex/config.toml`). Codex reaches the HTTP endpoint through the
-`mcp-remote` bridge:
-
-```toml
-[mcp_servers.flyway-sequence]
-command = "npx"
-args = [
-  "-y",
-  "mcp-remote@latest",
-  "https://flyway.ynbr.one/api/mcp",
-]
-```
-
-## Authorization
-
-The server uses OAuth — you log in through the browser once, and the client caches the token for
-later runs. Adding the server (above) only registers it; you still need to authorize before the
-tools work.
+First sign in at `https://flyway.ynbr.one/clients` with a GitHub organization member
+account and register the client application. Registration is per application; users authorize
+with their own accounts. Use a native public client with PKCE.
 
 ### Claude Code
 
-After `claude mcp add …`, the server is registered but unauthenticated. Inside an interactive
-Claude Code session:
+Register `http://localhost:8080/callback`, then run:
 
-1. Run the `/mcp` command.
-2. Select `flyway-sequence` from the list.
-3. Choose **Authenticate** — this opens your browser to the login page.
-4. Complete the login. Claude Code stores the token and the server flips to **connected**.
+```bash
+claude mcp add --transport http --client-id YOUR_CLIENT_ID --callback-port 8080 \
+  flyway-sequence https://flyway.ynbr.one/api/mcp
+```
 
-If the token expires later, repeat `/mcp` → `flyway-sequence` → **Authenticate** to refresh it.
+In an interactive Claude Code session, run `/mcp`, select `flyway-sequence`, and choose
+**Authenticate**. Complete GitHub login and consent in your browser.
 
 ### Codex
 
-`mcp-remote` drives the OAuth flow for you. The first time Codex starts the server, `mcp-remote`
-opens a browser window to the login page (in a headless environment it prints a URL to open
-manually). After you finish logging in, the token is cached under `~/.mcp-auth/` and reused on
-subsequent runs — no per-session login needed.
-
-To force a fresh login (e.g. the token went stale or you switched accounts), clear the cache:
+Register `http://127.0.0.1/callback` as a native loopback callback, then run:
 
 ```bash
-rm -rf ~/.mcp-auth
+codex mcp add flyway-sequence --url https://flyway.ynbr.one/api/mcp --oauth-client-id YOUR_CLIENT_ID
+codex mcp login flyway-sequence --scopes openid,profile,email,offline_access,mcp:write
 ```
 
-The next Codex run will trigger the browser login again.
+Codex connects directly over HTTP and manages OAuth credentials. Access tokens last 24 hours;
+refresh tokens last 180 days. Clients can refresh without repeating browser login. If you need
+to switch accounts, use the client's logout and login commands.
+
+Use a client version supporting MCP `2026-07-28`.
 
 ## Verify
 
